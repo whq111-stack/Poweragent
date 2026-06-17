@@ -218,6 +218,7 @@ class SkillMyFeature(SkillBase):
 4. **编码**：所有文件使用 UTF-8 编码，兼容 Windows 环境
 5. **安全**：API Key 等敏感信息从 .env 文件读取，不硬编码
 
-## 📝 许可
+## 📝 版本
 
-本项目仅供学习和研究使用。
+
+v1：以华东地区电网布局问题为例，原本的agent依赖固定的提示词而未考虑用户问题，现调整为根据topic和full_question先确定回答维度，再进行具体回答
