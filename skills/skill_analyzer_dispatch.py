@@ -84,13 +84,17 @@ class SkillAnalyzerDispatch(SkillBase):
         执行调度策略分析。
 
         Args:
-            params: 执行参数
+            params: 执行参数，包含：
+                - topic: 意图识别提取的主题关键词
+                - task: 用户的完整原始问题
 
         Returns:
             Dict[str, Any]: 分析结果
         """
+        # 优先使用用户的完整问题，如果没有则使用 topic
+        full_question = params.get("task", params.get("topic", "调度策略"))
         topic = params.get("topic", "调度策略")
-        logger.info(f"开始调度策略分析 | 主题: {topic}")
+        logger.info(f"开始调度策略分析 | 主题: {topic} | 完整问题: {full_question}")
 
         # 1. 读取已采集的数据
         collected_data = self._load_collected_data()
@@ -98,12 +102,12 @@ class SkillAnalyzerDispatch(SkillBase):
         # 2. 尝试使用 LLM 分析
         analysis = None
         if self._llm_client:
-            analysis = self._analyze_with_llm(topic, collected_data)
+            analysis = self._analyze_with_llm(full_question, topic, collected_data)
 
         # 3. 如果 LLM 分析失败，使用规则化分析
         if not analysis:
             logger.info("LLM 分析不可用，使用规则化分析")
-            analysis = self._analyze_with_rules(topic, collected_data)
+            analysis = self._analyze_with_rules(full_question, topic, collected_data)
 
         # 4. 保存分析结果
         file_path = self._save_analysis(analysis, topic)
@@ -142,14 +146,15 @@ class SkillAnalyzerDispatch(SkillBase):
         logger.info(f"已加载 {len(all_data)} 个数据文件")
         return all_data
 
-    def _analyze_with_llm(self, topic: str, collected_data: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _analyze_with_llm(self, full_question: str, topic: str, collected_data: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
         使用 LLM 分析调度策略。
 
-        分步骤引导小模型进行分析。
+        根据用户主题动态生成分析内容。
 
         Args:
-            topic: 分析主题
+            full_question: 用户的完整原始问题
+            topic: 意图识别提取的主题关键词
             collected_data: 已采集的数据
 
         Returns:
@@ -161,38 +166,30 @@ class SkillAnalyzerDispatch(SkillBase):
         try:
             data_summary = self._summarize_data(collected_data)
 
-            # 第一步：分析经济调度策略
-            step1_prompt = (
-                f"分析电力系统经济调度策略。\n\n"
-                f"参考数据：{data_summary}\n\n"
-                f"请回答：\n"
-                f"1. 主要的经济调度手段有哪些？\n"
-                f"2. 如何降低系统运行成本？\n"
-                f"请用JSON格式回答。"
-            )
-            step1_result = self._llm_client.structured_chat(
-                system_prompt="你是电力调度专家。用JSON格式回答。",
-                user_prompt=step1_prompt,
+            # 根据用户主题确定分析维度
+            analysis_dimensions = self._determine_dimensions(full_question)
+
+            # 根据用户主题和数据进行综合分析
+            main_prompt = (
+                f"作为电力调度专家，请针对以下问题进行调度策略分析：\n\n"
+                f"用户问题：{full_question}\n"
+                f"主题关键词：{topic}\n\n"
+                f"参考数据：\n{data_summary}\n\n"
+                f"请从以下维度进行分析：\n"
+                f"{analysis_dimensions}\n\n"
+                f"请用JSON格式回答，包含分析内容和关键发现。"
             )
 
-            # 第二步：分析新能源消纳策略
-            step2_prompt = (
-                f"分析新能源消纳调度策略。\n\n"
-                f"参考数据：{data_summary}\n\n"
-                f"请回答：\n"
-                f"1. 新能源消纳面临哪些挑战？\n"
-                f"2. 有哪些调度手段可以提升消纳？\n"
-                f"请用JSON格式回答。"
-            )
-            step2_result = self._llm_client.structured_chat(
-                system_prompt="你是电力调度专家。用JSON格式回答。",
-                user_prompt=step2_prompt,
+            analysis_result = self._llm_client.structured_chat(
+                system_prompt="你是电力调度专家，擅长分析电力系统调度策略。请根据用户的具体问题，提供详细、准确的分析报告。回答必须与用户的问题紧密相关，不要提供无关的通用信息。",
+                user_prompt=main_prompt,
             )
 
             analysis = {
                 "method": "llm",
-                "economic_dispatch": step1_result or "LLM 分析不可用",
-                "renewable_integration": step2_result or "LLM 分析不可用",
+                "topic": topic,
+                "full_question": full_question,
+                "analysis": analysis_result or "LLM 分析不可用",
                 "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
@@ -202,12 +199,51 @@ class SkillAnalyzerDispatch(SkillBase):
             logger.error(f"LLM 分析失败: {e}")
             return None
 
-    def _analyze_with_rules(self, topic: str, collected_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _determine_dimensions(self, full_question: str) -> str:
+        """
+        根据用户主题确定分析维度。
+
+        Args:
+            full_question: 用户的完整原始问题
+
+        Returns:
+            str: 分析维度列表
+        """
+        topic_lower = full_question.lower()
+        
+        dimensions = []
+        
+        if any(word in topic_lower for word in ["经济", "成本", "优化", "机组组合"]):
+            dimensions.append("1. 经济调度策略（发电成本优化、机组组合）")
+        
+        if any(word in topic_lower for word in ["安全", "约束", "N-1", "断面"]):
+            dimensions.append("2. 安全约束调度（N-1/N-2 校验、断面控制）")
+        
+        if any(word in topic_lower for word in ["新能源", "消纳", "风电", "光伏"]):
+            dimensions.append("3. 新能源消纳策略（优先调度、储能配合）")
+        
+        if any(word in topic_lower for word in ["辅助服务", "调频", "调峰", "备用"]):
+            dimensions.append("4. 辅助服务机制（调频、调峰、备用）")
+        
+        if any(word in topic_lower for word in ["市场", "现货", "交易"]):
+            dimensions.append("5. 市场化调度（现货市场、辅助服务市场）")
+        
+        if not dimensions:
+            dimensions = [
+                "1. 经济调度策略",
+                "2. 新能源消纳策略",
+                "3. 安全约束调度",
+            ]
+        
+        return "\n".join(dimensions)
+
+    def _analyze_with_rules(self, full_question: str, topic: str, collected_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         使用规则化方法分析调度策略。
 
         Args:
-            topic: 分析主题
+            full_question: 用户的完整原始问题
+            topic: 意图识别提取的主题关键词
             collected_data: 已采集的数据
 
         Returns:
@@ -216,6 +252,7 @@ class SkillAnalyzerDispatch(SkillBase):
         analysis = {
             "method": "rule_based",
             "topic": topic,
+            "full_question": full_question,
             "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "economic_dispatch": {
                 "description": "经济调度策略分析",
